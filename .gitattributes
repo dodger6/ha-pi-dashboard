@@ -1,0 +1,3 @@
+*.tgz binary
+*.sh text eol=lf
+/ha-dash text eol=lf

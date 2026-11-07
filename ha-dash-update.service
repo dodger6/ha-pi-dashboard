@@ -1,0 +1,24 @@
+[Unit]
+Description=ha-dash self-update (checks GitHub for a newer kiosk)
+Documentation=file://__HA_DASH_HOME__/ha-dash/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-__HA_DASH_ETCDIR__/machine
+ExecStart=/usr/bin/python3 /usr/local/lib/ha-dash/updater.py
+SyslogIdentifier=ha-dash-update
+TimeoutStartSec=10min
+Nice=10
+# Root-owned copy, so the desktop user cannot change what runs as root.
+RuntimeDirectory=ha-dash-update
+StateDirectory=ha-dash-update
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=__HA_DASH_HOME__ -/usr/local/lib/ha-dash
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

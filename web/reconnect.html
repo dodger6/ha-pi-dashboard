@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Reconnecting to Home Assistant…</title>
+<style>
+  :root {
+    --bg: #07090d;
+    --ink: #f4f7fb;
+    --muted: #93a0b0;
+    --blue: #3ec4f5;
+    --blue-dim: rgba(62, 196, 245, 0.16);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Liberation Sans", "Noto Sans", "Segoe UI", system-ui, sans-serif;
+    touch-action: manipulation;
+    cursor: none;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(900px 420px at 50% 38%, #142033 0%, rgba(20, 32, 51, 0) 72%),
+      var(--bg);
+  }
+  main {
+    width: min(36rem, calc(100% - 3rem));
+    text-align: center;
+  }
+  .orb {
+    width: 4.25rem;
+    height: 4.25rem;
+    margin: 0 auto 1.35rem;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, var(--blue) 0 0.42rem, transparent 0.5rem),
+      radial-gradient(circle at 50% 50%, transparent 0 1.05rem, var(--blue-dim) 1.15rem 100%);
+    box-shadow: 0 0 0 1px rgba(62, 196, 245, 0.4);
+    position: relative;
+  }
+  .orb::after {
+    content: "";
+    position: absolute;
+    inset: -0.45rem;
+    border-radius: inherit;
+    border: 2px solid rgba(62, 196, 245, 0.5);
+    animation: pulse 2.4s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { transform: scale(0.94); opacity: 0.85; }
+    100% { transform: scale(1.16); opacity: 0; }
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(1.35rem, 3.05vw, 2.05rem);
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    white-space: nowrap;
+  }
+  .lead {
+    margin: 0.75rem auto 0;
+    max-width: 26rem;
+    color: var(--muted);
+    font-size: clamp(0.95rem, 2.1vw, 1.15rem);
+    line-height: 1.4;
+  }
+  .target {
+    margin: 1.35rem auto 0;
+    color: #d5deea;
+    font-family: ui-monospace, "DejaVu Sans Mono", monospace;
+    font-size: 0.92rem;
+    line-height: 1.4;
+    word-break: break-all;
+  }
+  .detail {
+    margin: 0.4rem 0 0;
+    color: #6e7c8d;
+    font-size: 0.82rem;
+    min-height: 1.1em;
+  }
+  @media (max-height: 640px) {
+    .orb { width: 3.4rem; height: 3.4rem; margin-bottom: 1rem; }
+    .lead { margin-top: 0.55rem; }
+    .target { margin-top: 1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .orb::after { animation: none; opacity: 0.55; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="orb" aria-hidden="true"></div>
+  <h1>Reconnecting to Home Assistant…</h1>
+  <p class="lead">This screen will switch back on its own as soon as the server answers.</p>
+  <p class="target" id="target">%%TARGET%%</p>
+  <p class="detail" id="detail">%%DETAIL%%</p>
+</main>
+<script>
+(function () {
+  var state = %%INITIAL%%;
+  var tries = 0;
+  function text(id, value) {
+    document.getElementById(id).textContent = value || "";
+  }
+  function render() {
+    text("target", state.target_url || "");
+    var bits = [];
+    if (state.detail) bits.push(state.detail);
+    if (tries) bits.push("try " + tries);
+    text("detail", bits.join(" · "));
+  }
+  function arm(url) {
+    try {
+      var u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return;
+      window.location.replace(url);
+    } catch (e) {}
+  }
+  function tick() {
+    tries += 1;
+    fetch("/api/status", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        state = s;
+        render();
+        if (s.ha_up && s.target_url) arm(s.target_url);
+      })
+      .catch(function () {
+        state.detail = "Waiting for the local display service";
+        render();
+      });
+    fetch("/api/heartbeat", { method: "POST", cache: "no-store" }).catch(function () {});
+  }
+  render();
+  setInterval(tick, 2000);
+})();
+</script>
+</body>
+</html>

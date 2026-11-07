@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "HA Dash kiosk",
+  "version": "1.0.0",
+  "description": "Hides the pointer when idle and, when enabled, the Home Assistant header and sidebar.",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["cursor.js", "chrome.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
