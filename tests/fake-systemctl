@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Stand-in for systemctl during the install test. Not used on a Pi.
+set -uo pipefail
+log="${HA_DASH_SYSTEMCTL_LOG:-/tmp/ha-dash-systemctl.log}"
+mkdir -p "$(dirname "$log")"
+echo "$*" >> "$log"
+cmd="${1:-}"
+shift || true
+
+stop_supervisor() {
+  local pidfile="${HA_DASH_STATE_DIR:-}/supervisor.pid"
+  [ -n "${HA_DASH_STATE_DIR:-}" ] || return 0
+  [ -f "$pidfile" ] || return 0
+  local pid
+  pid="$(cat "$pidfile")"
+  kill "$pid" 2>/dev/null || true
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  rm -f "$pidfile"
+}
+
+start_supervisor() {
+  [ -n "${HA_DASH_INSTALL_DIR:-}" ] || exit 1
+  [ -n "${HA_DASH_STATE_DIR:-}" ] || exit 1
+  mkdir -p "$HA_DASH_STATE_DIR"
+  setsid python3 "$HA_DASH_INSTALL_DIR/supervisor.py" >>"$HA_DASH_STATE_DIR/supervisor.log" 2>&1 < /dev/null &
+  echo $! > "$HA_DASH_STATE_DIR/supervisor.pid"
+}
+
+case "$cmd" in
+  daemon-reload|enable|mask|unmask|set-default)
+    exit 0
+    ;;
+  restart|start)
+    unit="${1:-}"
+    unit="${unit%.service}"
+    if [ "$unit" = "ha-dash" ]; then
+      stop_supervisor
+      start_supervisor
+    fi
+    exit 0
+    ;;
+  stop|disable)
+    if [ "${1:-}" = "--now" ]; then
+      shift
+    fi
+    unit="${1:-}"
+    unit="${unit%.service}"
+    if [ "$cmd" = "stop" ] || [ "$unit" = "ha-dash" ]; then
+      stop_supervisor
+    fi
+    exit 0
+    ;;
+  is-active|is-enabled)
+    unit="${1:-}"
+    unit="${unit%.service}"
+    unit="${unit%.timer}"
+    if [ "$unit" = "ha-dash-update" ]; then
+      echo active
+      exit 0
+    fi
+    pidfile="${HA_DASH_STATE_DIR:-}/supervisor.pid"
+    if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      echo active
+      exit 0
+    fi
+    echo inactive
+    exit 3
+    ;;
+  list-timers)
+    echo "Sat 2026-11-07 23:00 UTC 9min Sat 2026-11-07"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

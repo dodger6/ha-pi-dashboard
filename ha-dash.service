@@ -1,0 +1,30 @@
+[Unit]
+Description=Home Assistant kiosk supervisor (reconnect page and display watchdog)
+Documentation=file://__HA_DASH_HOME__/ha-dash/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__HA_DASH_USER__
+Group=__HA_DASH_GROUP__
+ExecStart=/usr/bin/python3 __HA_DASH_HOME__/ha-dash/supervisor.py
+Environment=HA_DASH_CONFIG=__HA_DASH_CONFIG__
+Environment=XDG_RUNTIME_DIR=/run/user/__HA_DASH_UID__
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=2
+SyslogIdentifier=ha-dash
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+RuntimeDirectory=ha-dash
+StateDirectory=ha-dash
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""ha-dash: status and controls for the Home Assistant kiosk."""
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+
+import config as cfgmod  # noqa: E402
+import session as sessionmod  # noqa: E402
+
+PRIVILEGED = {"set-url", "set-dashboard", "set-resolution", "reload", "update", "uninstall"}
+
+
+def etcdir():
+    return os.environ.get("HA_DASH_ETCDIR", "/etc/ha-dash")
+
+
+def unitdir():
+    return os.environ.get("HA_DASH_UNITDIR", "/etc/systemd/system")
+
+
+def libdir():
+    return os.environ.get("HA_DASH_LIBDIR", "/usr/local/lib/ha-dash")
+
+
+def bindir():
+    return os.environ.get("HA_DASH_BINDIR", "/usr/local/bin")
+
+
+def read_kv(path):
+    data = {}
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        return data
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key.strip()] = value.strip()
+    return data
+
+
+def machine():
+    return read_kv(os.path.join(etcdir(), "machine"))
+
+
+def identity():
+    info = machine()
+    user = os.environ.get("HA_DASH_USER") or info.get("HA_DASH_USER") or pwd.getpwuid(os.getuid()).pw_name
+    if os.geteuid() == 0 and user == "root":
+        user = info.get("HA_DASH_USER") or user
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        pw = pwd.getpwuid(os.getuid())
+        user = pw.pw_name
+    home = os.environ.get("HA_DASH_HOME_DIR") or info.get("HA_DASH_HOME") or pw.pw_dir
+    group = os.environ.get("HA_DASH_GROUP") or info.get("HA_DASH_GROUP") or pwd.getpwuid(pw.pw_uid).pw_name
+    try:
+        import grp
+        group = info.get("HA_DASH_GROUP") or os.environ.get("HA_DASH_GROUP") or grp.getgrgid(pw.pw_gid).gr_name
+    except Exception:
+        pass
+    app = info.get("HA_DASH_INSTALL_DIR") or os.path.join(home, "ha-dash")
+    return user, group, home, app
+
+
+def systemctl(*args, check=False):
+    binary = os.environ.get("HA_DASH_SYSTEMCTL", "systemctl")
+    return subprocess.run([binary, *args], text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, check=check)
+
+
+def usage():
+    print("""ha-dash — Home Assistant kiosk on this Pi
+
+  ha-dash status
+  ha-dash set-url URL
+  ha-dash set-dashboard PATH
+  ha-dash set-resolution 1024x600
+  ha-dash set-resolution off
+  ha-dash reload
+  ha-dash update [--force]
+  ha-dash logs [-f] [-n N]
+  ha-dash login
+  ha-dash uninstall --yes
+
+The display does not run Home Assistant. It opens the server in /etc/ha-dash/config.
+""")
+
+
+def ensure_root(argv):
+    if os.geteuid() == 0:
+        return
+    os.execvp("sudo", ["sudo", "-E", sys.executable, os.path.realpath(__file__), *argv])
+
+
+def config_or_die():
+    path = cfgmod.config_path()
+    if not os.path.exists(path):
+        print(f"ha-dash is not installed ({path} is missing).", file=sys.stderr)
+        return None
+    try:
+        return cfgmod.load_valid(path)
+    except cfgmod.ConfigError as exc:
+        print(f"ha-dash config: {exc}", file=sys.stderr)
+        return None
+
+
+def clear_hold(home):
+    path = os.path.join(home, ".local", "state", "ha-dash", "hold")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def relaunch(user, home, app):
+    clear_hold(home)
+    systemctl("restart", "ha-dash.service")
+    try:
+        sessionmod.apply_resolution(home, user, cfgmod.config_path())
+    except Exception as exc:  # noqa: BLE001
+        print(f"resolution: {exc}", file=sys.stderr)
+    print(sessionmod.relaunch_kiosk(user, app))
+
+
+def refresh_session(user, group, home, app):
+    sessionmod.apply_session(home, user, group, app, etcdir(), cfgmod.config_path())
+    try:
+        cfgmod.write_policies(cfgmod.load_valid())
+    except cfgmod.ConfigError as exc:
+        print(f"ha-dash config: {exc}", file=sys.stderr)
+        return 1
+    relaunch(user, home, app)
+    return 0
+
+
+def cmd_status():
+    cfg = config_or_die()
+    if cfg is None:
+        return 1
+    user, _group, home, app = identity()
+    version = "unknown"
+    ver_path = os.path.join(app, "VERSION")
+    if os.path.isfile(ver_path):
+        version = open(ver_path, encoding="utf-8").read().strip()
+    active = systemctl("is-active", "ha-dash.service")
+    enabled = systemctl("is-enabled", "ha-dash.service")
+    timer = systemctl("is-active", "ha-dash-update.timer")
+    timer_on = systemctl("is-enabled", "ha-dash-update.timer")
+    nxt = systemctl("list-timers", "--all", "--no-legend", "ha-dash-update.timer")
+    next_when = " ".join((nxt.stdout or "").split()[:4]) if nxt.returncode == 0 else ""
+    reach = "unknown"
+    detail = ""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['PORT']}/api/status", timeout=2) as resp:
+            import json
+            status = json.loads(resp.read().decode("utf-8"))
+        reach = "reachable" if status.get("ha_up") else "unreachable"
+        detail = status.get("detail") or ""
+        version = status.get("version") or version
+    except Exception:
+        reach = "supervisor not running"
+    probe = subprocess.run(["pgrep", "-f", "[h]a-dash-chromium"], stdout=subprocess.PIPE, text=True, check=False)
+    kiosk = "running" if probe.returncode == 0 and probe.stdout.strip() else "not running"
+    profile = os.path.join(home, ".config", "ha-dash-chromium")
+    profile_state = "present" if os.path.isdir(profile) else "not created yet"
+    resolution = cfg["RESOLUTION"] or "(unchanged)"
+    dashboard = cfg["DASHBOARD"] or "(server default)"
+    sched = "always on" if not cfg["SCREEN_ON"] else f"{cfg['SCREEN_ON']}–{cfg['SCREEN_OFF']}"
+    cursor = f"hide after {int(cfg['CURSOR_IDLE_MS']) / 1000:g}s" if cfg["CURSOR_AUTOHIDE"] == "1" else "always shown"
+    chrome = "header and sidebar hidden" if cfg["KIOSK_UI"] == "1" else "Home Assistant chrome shown"
+    rows = [
+        ("version", version),
+        ("user", user),
+        ("ha url", cfg["HA_URL"]),
+        ("dashboard", dashboard),
+        ("target", cfgmod.target_url(cfg)),
+        ("kiosk ui", chrome),
+        ("zoom", cfg["ZOOM"]),
+        ("resolution", f"{resolution} scale 1" if cfg["RESOLUTION"] else resolution),
+        ("cursor", cursor),
+        ("screen", sched),
+        ("ha", reach + (f" ({detail})" if detail and reach == "unreachable" else "")),
+        ("supervisor", f"{(active.stdout or '').strip()}, {(enabled.stdout or '').strip()}"),
+        ("update timer", f"{(timer.stdout or '').strip()}, {(timer_on.stdout or '').strip()}"),
+        ("next update check", next_when or "unknown"),
+        ("kiosk", kiosk),
+        ("profile", f"{profile} ({profile_state})"),
+        ("config", cfgmod.config_path()),
+    ]
+    width = max(len(name) for name, _value in rows)
+    for name, value in rows:
+        print(f"{name:<{width}}  {value}")
+    return 0
+
+
+def cmd_set_url(url):
+    user, group, home, app = identity()
+    try:
+        cfg = cfgmod.apply_updates(cfgmod.config_path(), url=url)
+        cfgmod.write_policies(cfg)
+    except cfgmod.ConfigError as exc:
+        print(f"ha-dash config: {exc}", file=sys.stderr)
+        return 1
+    print(cfgmod.target_url(cfg))
+    return refresh_session(user, group, home, app)
+
+
+def cmd_set_dashboard(path):
+    user, group, home, app = identity()
+    try:
+        cfg = cfgmod.apply_updates(cfgmod.config_path(), dashboard=path)
+        cfgmod.write_policies(cfg)
+    except cfgmod.ConfigError as exc:
+        print(f"ha-dash config: {exc}", file=sys.stderr)
+        return 1
+    print(cfgmod.target_url(cfg))
+    return refresh_session(user, group, home, app)
+
+
+def cmd_set_resolution(value):
+    user, group, home, app = identity()
+    clear = value in ("off", "clear", "default", "-", "none")
+    try:
+        cfg = cfgmod.apply_updates(
+            cfgmod.config_path(),
+            resolution="" if clear else value,
+            resolution_set=True,
+        )
+    except cfgmod.ConfigError as exc:
+        print(f"ha-dash config: {exc}", file=sys.stderr)
+        return 1
+    print("resolution:", cfg["RESOLUTION"] or "unchanged (output mode left to the desktop)")
+    return refresh_session(user, group, home, app)
+
+
+def cmd_reload():
+    user, group, home, app = identity()
+    return refresh_session(user, group, home, app)
+
+
+def cmd_update(force):
+    updater = os.path.join(libdir(), "updater.py")
+    if not os.path.isfile(updater):
+        updater = os.path.join(HERE, "updater.py")
+    cmd = [sys.executable, updater]
+    if force:
+        cmd.append("--force")
+    result = subprocess.run(cmd, check=False)
+    return result.returncode
+
+
+def cmd_logs(argv):
+    follow = False
+    count = "200"
+    i = 0
+    while i < len(argv):
+        if argv[i] == "-f":
+            follow = True
+        elif argv[i] == "-n" and i + 1 < len(argv):
+            count = argv[i + 1]
+            i += 1
+        i += 1
+    cmd = ["journalctl", "-u", "ha-dash", "-u", "ha-dash-update", "-t", "ha-dash-kiosk",
+           "--no-pager", "-o", "short-iso"]
+    if follow:
+        cmd.append("-f")
+    else:
+        cmd.extend(["-n", count])
+    user, _group, home, _app = identity()
+    print(f"# kiosk file log: {os.path.join(home, '.local', 'state', 'ha-dash', 'kiosk.log')}", flush=True)
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0 and os.geteuid() != 0:
+        return subprocess.run(["sudo", *cmd], check=False).returncode
+    return result.returncode
+
+
+def cmd_login():
+    if os.geteuid() == 0:
+        user, _group, _home, _app = identity()
+        if user != "root":
+            os.execvp("sudo", ["sudo", "-u", user, "-H", sys.executable, os.path.realpath(__file__), "login"])
+    user, _group, home, app = identity()
+    kiosk = os.path.join(app, "kiosk.sh")
+    if not os.path.isfile(kiosk):
+        print(f"kiosk is not installed at {kiosk}", file=sys.stderr)
+        return 1
+    hold_dir = os.path.join(home, ".local", "state", "ha-dash")
+    os.makedirs(hold_dir, mode=0o755, exist_ok=True)
+    hold = os.path.join(hold_dir, "hold")
+    with open(hold, "w", encoding="utf-8") as fh:
+        fh.write("login\n")
+    try:
+        subprocess.run(["pkill", "-f", "[h]a-dash-chromium"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        for _ in range(20):
+            probe = subprocess.run(["pgrep", "-f", "[h]a-dash-chromium"], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, check=False)
+            if probe.returncode != 0:
+                break
+            time.sleep(0.3)
+        sessionmod.apply_resolution(home, user, cfgmod.config_path(), apply_only=True)
+        print("Sign in to Home Assistant and turn on Keep me logged in.")
+        print("Close the window when you are done; the kiosk resumes.")
+        result = subprocess.run([kiosk, "--window-once"], check=False)
+        return result.returncode
+    finally:
+        try:
+            os.remove(hold)
+        except OSError:
+            pass
+
+
+def cmd_uninstall(yes):
+    user, group, home, app = identity()
+    if not yes:
+        print("This removes the kiosk, its Home Assistant login profile, and ha-dash settings.")
+        print("Other autostart entries are left in place.")
+        print("The display mode is restored when ha-dash changed it.")
+        print("Run: ha-dash uninstall --yes")
+        return 2
+    print(f"Stopping ha-dash for {user}…")
+    systemctl("disable", "--now", "ha-dash.service")
+    systemctl("disable", "--now", "ha-dash-update.timer")
+    systemctl("stop", "ha-dash-update.service")
+    clear_hold(home)
+    subprocess.run(["pkill", "-f", f"{app}/kiosk.sh"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    subprocess.run(["pkill", "-u", user, "-f", "[h]a-dash-chromium"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    try:
+        outcome = sessionmod.revert_session(home, user, group, app, etcdir())
+        print(f"display mode: {outcome}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"session cleanup: {exc}", file=sys.stderr)
+    for name in ("ha-dash.service", "ha-dash-update.service", "ha-dash-update.timer"):
+        path = os.path.join(unitdir(), name)
+        if os.path.isfile(path):
+            os.remove(path)
+            print(f"removed {path}")
+    systemctl("daemon-reload")
+    link = os.path.join(bindir(), "ha-dash")
+    lib_cli = os.path.join(libdir(), "ha-dash")
+    if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(lib_cli):
+        os.remove(link)
+        print(f"removed {link}")
+    if os.path.isdir(libdir()):
+        shutil.rmtree(libdir(), ignore_errors=True)
+        print(f"removed {libdir()}")
+    for directory in cfgmod.policy_dirs():
+        path = os.path.join(directory, "ha-dash.json")
+        if os.path.isfile(path):
+            os.remove(path)
+            print(f"removed {path}")
+    dropin = "/etc/lightdm/lightdm.conf.d/50-ha-dash-autologin.conf"
+    if os.path.isfile(dropin):
+        os.remove(dropin)
+        print(f"removed {dropin}")
+    for path in (app, app + ".prev", app + ".failed"):
+        if os.path.isdir(path) or os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+            print(f"removed {path}")
+    for path in (
+        os.path.join(home, ".config", "ha-dash-chromium"),
+        os.path.join(home, ".cache", "ha-dash"),
+        os.path.join(home, ".local", "state", "ha-dash"),
+    ):
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            print(f"removed {path}")
+    if os.path.isdir(etcdir()):
+        shutil.rmtree(etcdir(), ignore_errors=True)
+        print(f"removed {etcdir()}")
+    print("Uninstall finished. Desktop autologin was left as it is.")
+    print("Entries already in ~/.config/autostart were not changed.")
+    return 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        usage()
+        return 0
+    cmd = argv[0]
+    if cmd in PRIVILEGED:
+        ensure_root(argv)
+    if cmd == "status":
+        return cmd_status()
+    if cmd == "set-url" and len(argv) == 2:
+        return cmd_set_url(argv[1])
+    if cmd == "set-dashboard" and len(argv) == 2:
+        return cmd_set_dashboard(argv[1])
+    if cmd == "set-resolution" and len(argv) == 2:
+        return cmd_set_resolution(argv[1])
+    if cmd == "reload":
+        return cmd_reload()
+    if cmd == "update":
+        return cmd_update("--force" in argv[1:])
+    if cmd == "logs":
+        return cmd_logs(argv[1:])
+    if cmd == "login":
+        return cmd_login()
+    if cmd == "uninstall":
+        return cmd_uninstall("--yes" in argv[1:])
+    usage()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
