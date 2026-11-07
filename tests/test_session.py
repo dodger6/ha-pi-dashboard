@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+import grp
 import os
+import pwd
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -112,6 +115,78 @@ class SessionTests(unittest.TestCase):
             self.assertNotIn("# ha-dash-disabled:", restored)
             self.assertEqual(kanshi.read_text(encoding="utf-8"), original_kanshi)
             self.assertNotIn("# ha-dash-disabled:", system.read_text(encoding="utf-8"))
+
+
+class InstallerCliTests(unittest.TestCase):
+    """The commands install.sh, resolution.sh, and kiosk.sh actually run."""
+
+    def test_labwc_configure_cli_without_group_on_resolution(self):
+        user = pwd.getpwuid(os.getuid()).pw_name
+        group = grp.getgrgid(os.getgid()).gr_name
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            home = tmp / "home"
+            etc = tmp / "etc"
+            app = home / "ha-dash"
+            app.mkdir(parents=True)
+            (app / "kiosk.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (app / "resolution.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            labwc = home / ".config" / "labwc"
+            labwc.mkdir(parents=True)
+            (labwc / "autostart").write_text("/usr/bin/wf-panel-pi &\n", encoding="utf-8")
+            quest = home / ".config" / "autostart"
+            quest.mkdir(parents=True)
+            desktop = quest / "FamilyChoreQuest.desktop"
+            desktop.write_text(FAMILY, encoding="utf-8")
+            system = tmp / "system-autostart"
+            system.write_text("kanshi &\n", encoding="utf-8")
+            conf = etc / "config"
+            etc.mkdir()
+            config.apply_updates(
+                str(conf),
+                url="http://172.31.10.115:8123",
+                dashboard="/pi-lights/main",
+                resolution="1024x600",
+                resolution_set=True,
+            )
+            env = os.environ.copy()
+            env["HA_DASH_CONFIG"] = str(conf)
+            env["HA_DASH_SYSTEM_AUTOSTART"] = str(system)
+            env.pop("WAYLAND_DISPLAY", None)
+            apply = subprocess.run(
+                [sys.executable, str(ROOT / "session.py"), "apply",
+                 "--home", str(home), "--user", user, "--group", group,
+                 "--app", str(app), "--etcdir", str(etc), "--config", str(conf)],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+            # resolution.sh passes only --home. kiosk.sh adds --apply-only.
+            # Neither passes --group; that used to raise AttributeError.
+            resolution = subprocess.run(
+                [sys.executable, str(ROOT / "session.py"), "apply-resolution",
+                 "--home", str(home)],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(resolution.returncode, 0, resolution.stderr)
+            self.assertNotIn("AttributeError", resolution.stderr)
+            kiosk = subprocess.run(
+                [sys.executable, str(ROOT / "session.py"), "apply-resolution",
+                 "--apply-only", "--home", str(home)],
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(kiosk.returncode, 0, kiosk.stderr)
+            text = (labwc / "autostart").read_text(encoding="utf-8")
+            self.assertIn("/usr/bin/wf-panel-pi &", text)
+            self.assertIn(f"{app}/resolution.sh\n", text)
+            self.assertIn(f"{app}/kiosk.sh &", text)
+            self.assertEqual(text.count(f"{app}/kiosk.sh &"), 1)
+            kanshi = (home / ".config" / "kanshi" / "config").read_text(encoding="utf-8")
+            self.assertIn("mode 1024x600", kanshi)
+            self.assertIn("scale 1", kanshi)
+            self.assertNotIn("scale 2", kanshi)
+            self.assertEqual(desktop.read_text(encoding="utf-8"), FAMILY)
+            target = config.target_url(config.load_valid(str(conf)))
+            self.assertEqual(target, "http://172.31.10.115:8123/pi-lights/main?kiosk")
 
 
 if __name__ == "__main__":

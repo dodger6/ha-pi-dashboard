@@ -12,6 +12,24 @@
 # to ~/.config/labwc/autostart, which is separate.
 set -euo pipefail
 {
+# Remove the install scratch dir, including files sudo created inside it.
+# mktemp is owned by the desktop user; unpack used to run as root and left
+# root-owned web/ and extension/ directories the user could not delete.
+cleanup_tmp() {
+  local dir="${TMP:-}"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  if [ "$(id -u)" -ne 0 ]; then
+    sudo chown -R "$(id -un):$(id -gn)" "$dir" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$dir" >/dev/null 2>&1 || sudo rm -rf "$dir" >/dev/null 2>&1 || true
+}
+
+if [ "${HA_DASH_CLEANUP_SELFTEST:-}" = "1" ]; then
+  TMP="${1:-}"
+  cleanup_tmp
+  exit 0
+fi
+
 usage() {
   cat <<'EOF'
 Usage: install.sh [--url URL] [--dashboard PATH] [--resolution 1024x600] [--user NAME] [--zoom N]
@@ -164,7 +182,7 @@ command -v python3 >/dev/null || die "python3 not found"
 command -v curl >/dev/null || die "curl not found"
 
 TMP="$(mktemp -d /tmp/ha-dash-install.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+trap cleanup_tmp EXIT
 
 say "Downloading latest.json"
 curl -fsSL --retry 3 -o "$TMP/latest.json" "$BASE/latest.json" || die "could not download $BASE/latest.json"
@@ -218,8 +236,10 @@ if not found:
     sys.exit("archive has no ha-dash/updater.py")
 PY
 
-mkdir -p "$TMP/unpack"
-run_root env \
+mkdir -p "$TMP/unpack" "$TMP/state"
+# Unpack as the invoking user. The tarball and $TMP are theirs; running this
+# under sudo left root-owned files that `rm -rf "$TMP"` could not remove.
+env \
   HA_DASH_LOCK="$TMP/lock" \
   HA_DASH_STATE_DIR="$TMP/state" \
   HA_DASH_LIBDIR="$LIBDIR" \
@@ -288,7 +308,7 @@ run_root env \
   HA_DASH_KIOSK_USER="$KUSER" \
   HA_DASH_CONFIG="$CONFIG" \
   HA_DASH_LIBDIR="$LIBDIR" \
-  HA_DASH_LOCK="${HA_DASH_LOCK:-$TMP/lock2}" \
+  HA_DASH_LOCK="${HA_DASH_LOCK:-/run/ha-dash-update/lock}" \
   HA_DASH_STATE_DIR="${HA_DASH_STATE_DIR:-/var/lib/ha-dash-update}" \
   HA_DASH_KIOSK_RELAUNCH=0 \
   python3 "$LIBDIR/updater.py" --force --tarball "$TMP/ha-dash.tgz" --sha256 "$SHA" --version "$VERSION" \

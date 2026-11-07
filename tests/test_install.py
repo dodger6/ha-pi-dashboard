@@ -205,5 +205,27 @@ class InstallTests(unittest.TestCase):
         self.assertNotIn("# ha-dash-disabled:", system_autostart.read_text(encoding="utf-8"))
 
 
+class CleanupTests(unittest.TestCase):
+    def test_user_can_remove_root_owned_unpack(self):
+        if subprocess.run(["sudo", "-n", "true"], check=False).returncode != 0:
+            self.skipTest("sudo is required")
+        tmp = tempfile.mkdtemp(prefix="ha-dash-install.")
+        web = Path(tmp) / "unpack" / "web"
+        ext = Path(tmp) / "unpack" / "extension"
+        subprocess.run(["sudo", "mkdir", "-p", str(web), str(ext)], check=True)
+        subprocess.run(["sudo", "touch", str(web / "reconnect.html"), str(ext / "cursor.js")], check=True)
+        # A user rm of root-owned children must fail; the installer cleanup must not.
+        user_rm = subprocess.run(["rm", "-rf", tmp], check=False, stderr=subprocess.DEVNULL)
+        self.assertNotEqual(user_rm.returncode, 0)
+        self.assertTrue(web.is_dir())
+        result = subprocess.run(
+            ["bash", str(ROOT / "install.sh"), tmp],
+            env={**os.environ, "HA_DASH_CLEANUP_SELFTEST": "1"},
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.exists(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()
