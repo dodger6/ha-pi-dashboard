@@ -549,10 +549,23 @@ def relaunch_kiosk(user, app, pattern=KIOSK_MATCH):
     return f"relaunched ({where})"
 
 
+def _arg(args, name):
+    """Optional argparse value. Subcommands do not all define the same flags."""
+    value = getattr(args, name, None)
+    if value is None:
+        return ""
+    return str(value)
+
+
 def _user_group_home(args):
-    user = args.user or os.environ.get("HA_DASH_USER") or pwd.getpwuid(os.getuid()).pw_name
-    group = args.group or os.environ.get("HA_DASH_GROUP") or grp.getgrgid(pwd.getpwnam(user).pw_gid).gr_name
-    home = args.home or os.environ.get("HA_DASH_HOME_DIR") or pwd.getpwnam(user).pw_dir
+    user = _arg(args, "user") or os.environ.get("HA_DASH_USER") or pwd.getpwuid(os.getuid()).pw_name
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        pw = pwd.getpwuid(os.getuid())
+        user = pw.pw_name
+    group = _arg(args, "group") or os.environ.get("HA_DASH_GROUP") or grp.getgrgid(pw.pw_gid).gr_name
+    home = _arg(args, "home") or os.environ.get("HA_DASH_HOME_DIR") or pw.pw_dir
     return user, group, home
 
 
@@ -570,33 +583,38 @@ def main(argv=None):
     p = sub.add_parser("apply-resolution")
     p.add_argument("--home")
     p.add_argument("--user")
+    p.add_argument("--group")
     p.add_argument("--config")
     p.add_argument("--apply-only", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--fixture", default=os.environ.get("WLR_RANDR_FIXTURE", ""))
     p = sub.add_parser("relaunch")
+    p.add_argument("--home")
     p.add_argument("--user")
+    p.add_argument("--group")
     p.add_argument("--app", required=True)
     args = parser.parse_args(argv)
     if args.cmd == "apply":
         user, group, home = _user_group_home(args)
-        etcdir = args.etcdir or os.environ.get("HA_DASH_ETCDIR", "/etc/ha-dash")
-        config_path = args.config or cfgmod.config_path()
+        etcdir = _arg(args, "etcdir") or os.environ.get("HA_DASH_ETCDIR", "/etc/ha-dash")
+        config_path = _arg(args, "config") or cfgmod.config_path()
         apply_session(home, user, group, args.app, etcdir, config_path)
         return 0
     if args.cmd == "revert":
         user, group, home = _user_group_home(args)
-        etcdir = args.etcdir or os.environ.get("HA_DASH_ETCDIR", "/etc/ha-dash")
+        etcdir = _arg(args, "etcdir") or os.environ.get("HA_DASH_ETCDIR", "/etc/ha-dash")
         print(revert_session(home, user, group, args.app, etcdir))
         return 0
     if args.cmd == "apply-resolution":
         user, _group, home = _user_group_home(args)
         return apply_resolution(
-            home, user, args.config or cfgmod.config_path(),
-            apply_only=args.apply_only, dry_run=args.dry_run, fixture=args.fixture,
+            home, user, _arg(args, "config") or cfgmod.config_path(),
+            apply_only=bool(getattr(args, "apply_only", False)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+            fixture=_arg(args, "fixture"),
         )
     if args.cmd == "relaunch":
-        user = args.user or os.environ.get("HA_DASH_USER") or pwd.getpwuid(os.getuid()).pw_name
+        user, _group, _home = _user_group_home(args)
         print(relaunch_kiosk(user, args.app))
         return 0
     return 2
